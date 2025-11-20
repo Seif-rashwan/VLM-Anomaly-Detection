@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# Conda environments
+.conda/
+conda/
+*.conda
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Streamlit
+.streamlit/
+
+# Assets (cached files and uploads)
+assets/cache/*.pkl
+assets/uploads/*
+!assets/uploads/.gitkeep
+
+# Trained models (too large for git)
+assets/models/*.pkl
+!assets/models/.gitkeep
+
+# Baseline embeddings (can be regenerated)
+assets/baselines/*.npy
+!assets/baselines/.gitkeep
+
+# Model cache (OpenCLIP downloads)
+.cache/
+*.pt
+*.pth
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
