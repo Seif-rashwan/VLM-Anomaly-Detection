@@ -1019,37 +1019,6 @@ No environment variables required. All configuration is done through the Streaml
 
 ---
 
-## 🤝 Contributing
-
-This is a graduation project. Contributions are welcome!
-
-### Contribution Guidelines
-
-1. **Fork the Repository**: Create your own fork
-2. **Create Feature Branch**: `git checkout -b feature/amazing-feature`
-3. **Follow Code Style**: Match existing code style and comments
-4. **Test Thoroughly**: Ensure all functionality works
-5. **Update Documentation**: Update README if adding features
-6. **Submit Pull Request**: Describe changes clearly
-
-### Code Style
-
-- Follow PEP 8 Python style guide
-- Use type hints where appropriate
-- Add docstrings to all functions/classes
-- Keep functions focused and modular
-
-### Reporting Issues
-
-When reporting bugs, please include:
-- Python version
-- Operating system
-- Error messages (full traceback)
-- Steps to reproduce
-- Expected vs actual behavior
-
----
-
 ## 📄 License
 
 This project is developed for **educational purposes** as part of a graduation project.
