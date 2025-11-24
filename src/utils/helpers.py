@@ -55,7 +55,9 @@ def get_video_info(video_path: str) -> Optional[Tuple[float, int, float]]:
         cap.release()
         return (fps, frame_count, duration)
     except Exception as e:
-        print(f"Error getting video info: {e}")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Error getting video info: {e}")
         return None
 
 

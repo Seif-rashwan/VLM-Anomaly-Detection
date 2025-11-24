@@ -13,11 +13,19 @@ from PIL import Image
 import pandas as pd
 from collections import Counter
 
+# Setup logging first
+from src.utils.logger import setup_logging
+setup_logging()
+
 # Import project modules
 from src.video_processing import FrameExtractor
 from src.vlm import VLMEncoder
 from src.anomaly_detection import AnomalyDetector
 from src.utils import save_uploaded_file, get_video_info, format_time
+from src.config import Config
+
+# Load configuration
+config = Config()
 
 # Page configuration
 st.set_page_config(
@@ -35,6 +43,12 @@ if 'model_name' not in st.session_state:
     st.session_state.model_name = "anomaly_detector"  # Default model name
 if 'camera_active' not in st.session_state:
     st.session_state.camera_active = False
+if 'expected_objects' not in st.session_state:
+    st.session_state.expected_objects = None
+if 'use_temporal_averaging' not in st.session_state:
+    st.session_state.use_temporal_averaging = True
+if 'analysis_results' not in st.session_state:
+    st.session_state.analysis_results = None  # Store results for threshold adjustment
 
 # Title and description
 st.title("🎓 Anomaly Detection System using VLM")
@@ -67,11 +81,44 @@ pretrained = st.sidebar.selectbox(
     help="Pretrained dataset for the model"
 )
 
+# Dynamic Prompts Configuration
+st.sidebar.subheader("Expected Objects")
+expected_objects_input = st.sidebar.text_input(
+    "Expected Objects (comma-separated)",
+    value="",
+    help="Enter expected objects like 'worker, machine, forklift'. Leave empty for default prompts."
+)
+
+if expected_objects_input.strip():
+    expected_objects = [obj.strip() for obj in expected_objects_input.split(",") if obj.strip()]
+    st.session_state.expected_objects = expected_objects if expected_objects else None
+else:
+    st.session_state.expected_objects = None
+
+# Temporal Averaging
+st.sidebar.subheader("Processing Options")
+use_temporal_averaging = st.sidebar.checkbox(
+    "Use Temporal Averaging",
+    value=config.get('temporal_window_size', 5) > 1,
+    help="Average embeddings of last N frames to reduce noise (flickering anomalies)"
+)
+st.session_state.use_temporal_averaging = use_temporal_averaging
+
+temporal_window_size = st.sidebar.slider(
+    "Temporal Window Size",
+    min_value=1,
+    max_value=10,
+    value=config.get('temporal_window_size', 5),
+    step=1,
+    help="Number of frames to average for temporal smoothing",
+    disabled=not use_temporal_averaging
+)
+
 similarity_threshold = st.sidebar.slider(
     "Similarity Threshold",
     min_value=0.0,
     max_value=1.0,
-    value=0.6,
+    value=config.get('default_similarity_threshold', 0.6),
     step=0.05,
     help="Below this threshold, frames are flagged as anomalies. Lower values = more sensitive to small changes."
 )
@@ -80,7 +127,7 @@ frame_interval_ms = st.sidebar.slider(
     "Frame Interval (ms)",
     min_value=100,
     max_value=2000,
-    value=500,
+    value=config.get('frame_interval_ms', 500),
     step=100,
     help="Interval between extracted frames"
 )
@@ -97,11 +144,14 @@ if st.session_state.vlm_encoder is None:
         st.success("Model loaded successfully!")
 
 # Initialize components
-frame_extractor = FrameExtractor()
+frame_extractor = FrameExtractor(cache_dir=config.get('cache_dir', 'assets/cache'))
 
 # Initialize anomaly detector - use session state to persist across reruns
 if 'anomaly_detector' not in st.session_state:
-    st.session_state.anomaly_detector = AnomalyDetector()
+    st.session_state.anomaly_detector = AnomalyDetector(
+        model_dir=config.get('model_dir', 'assets/models'),
+        baseline_dir=config.get('baseline_dir', 'assets/baselines')
+    )
 
 anomaly_detector = st.session_state.anomaly_detector
 vlm_encoder = st.session_state.vlm_encoder
@@ -186,7 +236,10 @@ if mode == "📹 Upload Video Mode":
                                     video_descriptions = []
                                     for frame_idx, frame in enumerate(frames):
                                         try:
-                                            text, embedding = vlm_encoder.get_frame_embedding(frame)
+                                            text, embedding = vlm_encoder.get_frame_embedding(
+                                                frame, 
+                                                expected_objects=st.session_state.expected_objects
+                                            )
                                             video_embeddings.append(embedding)
                                             video_descriptions.append({
                                                 'video_name': baseline_video.name,
@@ -431,28 +484,55 @@ if mode == "📹 Upload Video Mode":
                                     if len(frames) == 0:
                                         st.error("❌ No valid frames found. Please try a different video.")
                                     else:
-                                        # Generate embeddings
+                                        # Reset temporal window if using temporal averaging
+                                        if st.session_state.use_temporal_averaging:
+                                            anomaly_detector.reset_temporal_window(temporal_window_size)
+                                        
+                                        # Generate embeddings using batch processing
+                                        batch_size = config.get('batch_size', 16)
                                         progress_bar = st.progress(0)
+                                        st.info(f"Processing {len(frames)} frames with batch size {batch_size}...")
+                                        
+                                        # Use batch processing for better GPU utilization
+                                        batch_results = vlm_encoder.get_frame_embeddings_batch(
+                                            frames,
+                                            expected_objects=st.session_state.expected_objects,
+                                            batch_size=batch_size
+                                        )
+                                        
                                         test_embeddings = []
                                         test_texts = []
+                                        for text, embedding in batch_results:
+                                            test_embeddings.append(embedding)
+                                            test_texts.append(text)
                                         
-                                        for i, frame in enumerate(frames):
-                                            try:
-                                                text, embedding = vlm_encoder.get_frame_embedding(frame)
-                                                test_embeddings.append(embedding)
-                                                test_texts.append(text)
-                                                progress_bar.progress((i + 1) / len(frames))
-                                            except Exception as e:
-                                                st.error(f"Error processing frame {i+1}: {e}")
-                                                continue
+                                        progress_bar.progress(1.0)
                                         
                                         if len(test_embeddings) == 0:
                                             st.error("❌ Failed to generate embeddings. Please try again.")
                                         else:
                                             # Detect anomalies using trained One-Class model
-                                            results = anomaly_detector.detect_anomalies(test_embeddings)
+                                            if st.session_state.use_temporal_averaging:
+                                                # Reset temporal window for fresh start
+                                                anomaly_detector.reset_temporal_window(temporal_window_size)
+                                                
+                                                # Use temporal averaging
+                                                results = []
+                                                for embedding in test_embeddings:
+                                                    is_anomaly, score = anomaly_detector.predict_with_temporal_averaging(embedding)
+                                                    results.append((is_anomaly, score))
+                                            else:
+                                                results = anomaly_detector.detect_anomalies(test_embeddings)
                                             
-                                            # Calculate statistics
+                                            # Store results for threshold adjustment
+                                            st.session_state.analysis_results = {
+                                                'frames': frames,
+                                                'results': results,
+                                                'test_texts': test_texts,
+                                                'test_embeddings': test_embeddings
+                                            }
+                                            
+                                            # Calculate statistics with current threshold (decision boundary is 0 for One-Class SVM)
                                             anomaly_count = sum(1 for is_anomaly, _ in results if is_anomaly)
                                             total_frames = len(results)
                                             anomaly_percentage = (anomaly_count / total_frames) * 100
@@ -499,7 +579,64 @@ if mode == "📹 Upload Video Mode":
                                             )
                                             st.plotly_chart(fig, use_container_width=True)
                                             
-                                            # Display frames with annotations
+                                            # Threshold Adjustment Section
+                                            st.subheader("🎚️ Adjust Decision Boundary")
+                                            st.markdown("""
+                                            **Note:** The One-Class SVM uses a decision boundary at 0. 
+                                            You can adjust the visualization threshold to see different classification results.
+                                            Negative scores indicate anomalies, positive scores indicate normal behavior.
+                                            """)
+                                            
+                                            # Store original results and allow threshold adjustment
+                                            adjusted_threshold = st.slider(
+                                                "Visualization Threshold",
+                                                min_value=-2.0,
+                                                max_value=2.0,
+                                                value=0.0,
+                                                step=0.1,
+                                                help="Adjust this to see how many frames would be flagged at different thresholds"
+                                            )
+                                            
+                                            # Recalculate with adjusted threshold
+                                            adjusted_anomaly_count = sum(1 for _, score in results if score < adjusted_threshold)
+                                            adjusted_percentage = (adjusted_anomaly_count / total_frames) * 100
+                                            
+                                            col1, col2 = st.columns(2)
+                                            with col1:
+                                                st.metric("Anomalies at Threshold", adjusted_anomaly_count, delta=adjusted_anomaly_count - anomaly_count)
+                                            with col2:
+                                                st.metric("Anomaly Rate", f"{adjusted_percentage:.1f}%", delta=f"{adjusted_percentage - anomaly_percentage:.1f}%")
+                                            
+                                            # Update graph with adjusted threshold line
+                                            fig_adjusted = go.Figure()
+                                            fig_adjusted.add_trace(go.Scatter(
+                                                x=frame_indices,
+                                                y=decision_scores,
+                                                mode='lines+markers',
+                                                name='Decision Score',
+                                                line=dict(color='blue', width=2)
+                                            ))
+                                            fig_adjusted.add_hline(
+                                                y=0,
+                                                line_dash="dash",
+                                                line_color="red",
+                                                annotation_text="Decision Boundary (0)"
+                                            )
+                                            fig_adjusted.add_hline(
+                                                y=adjusted_threshold,
+                                                line_dash="dot",
+                                                line_color="orange",
+                                                annotation_text=f"Visualization Threshold ({adjusted_threshold:.1f})"
+                                            )
+                                            fig_adjusted.update_layout(
+                                                title="Decision Scores with Adjustable Threshold",
+                                                xaxis_title="Frame Index",
+                                                yaxis_title="Decision Score",
+                                                height=400
+                                            )
+                                            st.plotly_chart(fig_adjusted, use_container_width=True)
+                                            
+                                            # Display frames with annotations (using adjusted threshold)
                                             st.subheader("🎬 Frames with Anomaly Detection")
                                             cols_per_row = 4
                                             for i in range(0, len(frames), cols_per_row):
@@ -508,6 +645,8 @@ if mode == "📹 Upload Video Mode":
                                                     idx = i + j
                                                     if idx < len(frames) and idx < len(results):
                                                         is_anomaly, decision_score = results[idx]
+                                                        # Use adjusted threshold for display
+                                                        display_anomaly = decision_score < adjusted_threshold
                                                         with col:
                                                             try:
                                                                 # Ensure frame is a valid PIL Image
@@ -518,7 +657,7 @@ if mode == "📹 Upload Video Mode":
                                                                         caption=f"Frame {idx+1}",
                                                                         use_container_width=True
                                                                     )
-                                                                    if is_anomaly:
+                                                                    if display_anomaly:
                                                                         st.error(f"🚨 Anomaly (Score: {decision_score:.3f})")
                                                                     else:
                                                                         st.success(f"✅ Normal (Score: {decision_score:.3f})")
@@ -527,6 +666,7 @@ if mode == "📹 Upload Video Mode":
                                                                     st.error(f"Invalid frame {idx+1}")
                                                             except Exception as e:
                                                                 st.error(f"Error displaying frame {idx+1}: {e}")
+                                            
                         except Exception as e:
                             st.error(f"❌ Error processing test video: {e}")
                             st.exception(e)
@@ -582,10 +722,17 @@ elif mode == "📷 Live Camera Mode":
             
             # Process frame
             with st.spinner("Processing frame..."):
-                text, embedding = vlm_encoder.get_frame_embedding(pil_image)
+                text, embedding = vlm_encoder.get_frame_embedding(
+                    pil_image, 
+                    expected_objects=st.session_state.expected_objects
+                )
                 
                 # Detect anomaly using trained model
-                is_anomaly, decision_score = anomaly_detector.predict(embedding)
+                if st.session_state.use_temporal_averaging:
+                    is_anomaly, decision_score = anomaly_detector.predict_with_temporal_averaging(embedding)
+                else:
+                    is_anomaly, decision_score = anomaly_detector.predict(embedding)
+                
                 # Convert decision score to similarity-like value for display
                 similarity = 1.0 / (1.0 + np.exp(-decision_score))  # Sigmoid normalization
                 

@@ -10,6 +10,9 @@ from typing import List, Optional
 import hashlib
 import pickle
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class FrameExtractor:
@@ -61,7 +64,7 @@ class FrameExtractor:
                 with open(cache_file, 'rb') as f:
                     return pickle.load(f)
             except Exception as e:
-                print(f"Error loading cache: {e}")
+                logger.warning(f"Error loading cache: {e}")
                 return None
         return None
     
@@ -78,7 +81,7 @@ class FrameExtractor:
             with open(cache_file, 'wb') as f:
                 pickle.dump(frames, f)
         except Exception as e:
-            print(f"Error saving cache: {e}")
+            logger.warning(f"Error saving cache: {e}")
     
     def extract_frames(
         self, 

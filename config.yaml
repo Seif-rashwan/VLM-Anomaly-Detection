@@ -1,0 +1,29 @@
+# Configuration file for Anomaly Detection System
+
+# Frame extraction settings
+frame_interval_ms: 500  # Interval between extracted frames in milliseconds
+
+# Model settings
+default_model_name: "ViT-B-32"  # Default OpenCLIP model variant
+default_pretrained: "openai"  # Default pretrained dataset
+
+# Directory paths
+model_dir: "assets/models"  # Directory to store trained models
+baseline_dir: "assets/baselines"  # Directory to store baseline embeddings
+cache_dir: "assets/cache"  # Directory for frame cache
+uploads_dir: "assets/uploads"  # Directory for uploaded videos
+
+# Anomaly detection settings
+default_similarity_threshold: 0.6  # Default similarity threshold
+default_nu: 0.1  # Default nu value for One-Class SVM (outlier fraction)
+
+# Temporal averaging settings
+temporal_window_size: 5  # Number of frames to average for temporal smoothing
+
+# Batch processing settings
+batch_size: 16  # Batch size for GPU processing
+
+# Logging settings
+log_level: "INFO"  # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+log_file: "logs/anomaly_detection.log"  # Log file path
+

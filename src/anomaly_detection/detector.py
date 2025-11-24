@@ -4,10 +4,14 @@ Anomaly detection using One-Class SVM model trained on normal embeddings
 
 import numpy as np
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Deque
+from collections import deque
 import pickle
 from sklearn.svm import OneClassSVM
 from sklearn.preprocessing import StandardScaler
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class AnomalyDetector:
@@ -32,6 +36,8 @@ class AnomalyDetector:
         self.model = None
         self.scaler = None
         self.is_trained = False
+        self.temporal_window: Optional[Deque[np.ndarray]] = None
+        self.temporal_window_size = 5  # Default, can be overridden
     
     def train_one_class_model(
         self,
@@ -59,7 +65,7 @@ class AnomalyDetector:
         if len(X) == 0:
             raise ValueError("No embeddings provided for training")
         
-        print(f"Training One-Class SVM on {len(X)} normal embeddings (dimension: {X.shape[1]})")
+        logger.info(f"Training One-Class SVM on {len(X)} normal embeddings (dimension: {X.shape[1]})")
         
         # CRITICAL: Standardize features using StandardScaler
         # This ensures all features are on the same scale (mean=0, std=1)
@@ -67,8 +73,8 @@ class AnomalyDetector:
         self.scaler = StandardScaler()
         X_scaled = self.scaler.fit_transform(X)
         
-        print(f"Scaled embeddings shape: {X_scaled.shape}")
-        print(f"Scaled embeddings - Mean: {X_scaled.mean(axis=0)[:5]} (first 5), Std: {X_scaled.std(axis=0)[:5]} (first 5)")
+        logger.info(f"Scaled embeddings shape: {X_scaled.shape}")
+        logger.debug(f"Scaled embeddings - Mean: {X_scaled.mean(axis=0)[:5]} (first 5), Std: {X_scaled.std(axis=0)[:5]} (first 5)")
         
         # Train One-Class SVM on scaled data
         self.model = OneClassSVM(nu=nu, kernel='rbf', gamma=gamma)
@@ -87,9 +93,9 @@ class AnomalyDetector:
             with open(scaler_file, 'wb') as f:
                 pickle.dump(self.scaler, f)
             
-            print(f"Model trained and saved: {model_file}")
-            print(f"Scaler saved: {scaler_file}")
-            print(f"Scaler fitted on {len(X)} samples with {X.shape[1]} features")
+            logger.info(f"Model trained and saved: {model_file}")
+            logger.info(f"Scaler saved: {scaler_file}")
+            logger.info(f"Scaler fitted on {len(X)} samples with {X.shape[1]} features")
             
             # Verify scaler was saved correctly
             if self.scaler is None:
@@ -97,7 +103,7 @@ class AnomalyDetector:
             
             return str(model_file)
         except Exception as e:
-            print(f"Error saving model/scaler: {e}")
+            logger.error(f"Error saving model/scaler: {e}", exc_info=True)
             raise
     
     def load_model(self, model_name: str = "default") -> bool:
@@ -115,11 +121,11 @@ class AnomalyDetector:
         scaler_file = self.model_dir / f"{model_name}_scaler.pkl"
         
         if not model_file.exists():
-            print(f"Model file not found: {model_file}")
+            logger.warning(f"Model file not found: {model_file}")
             return False
         
         if not scaler_file.exists():
-            print(f"Scaler file not found: {scaler_file}. Model cannot be used without scaler.")
+            logger.warning(f"Scaler file not found: {scaler_file}. Model cannot be used without scaler.")
             return False
         
         try:
@@ -133,20 +139,18 @@ class AnomalyDetector:
             
             # Verify both are loaded
             if self.model is None:
-                print("Error: Model object is None after loading")
+                logger.error("Error: Model object is None after loading")
                 return False
             
             if self.scaler is None:
-                print("Error: Scaler object is None after loading")
+                logger.error("Error: Scaler object is None after loading")
                 return False
             
             self.is_trained = True
-            print(f"Model and scaler loaded successfully: {model_name}")
+            logger.info(f"Model and scaler loaded successfully: {model_name}")
             return True
         except Exception as e:
-            print(f"Error loading model: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Error loading model: {e}", exc_info=True)
             self.model = None
             self.scaler = None
             self.is_trained = False
@@ -186,6 +190,43 @@ class AnomalyDetector:
         if baseline_file.exists():
             return np.load(baseline_file)
         return None
+    
+    def reset_temporal_window(self, window_size: int = 5):
+        """
+        Reset the temporal averaging window.
+        
+        Args:
+            window_size: Size of the temporal window for averaging
+        """
+        self.temporal_window_size = window_size
+        self.temporal_window = deque(maxlen=window_size)
+        logger.debug(f"Reset temporal window with size {window_size}")
+    
+    def predict_with_temporal_averaging(self, test_embedding: np.ndarray) -> Tuple[bool, float]:
+        """
+        Predict with temporal averaging (averages last N embeddings).
+        
+        Args:
+            test_embedding: Single test embedding (1D array)
+            
+        Returns:
+            Tuple of (is_anomaly, decision_score) based on averaged embedding
+        """
+        if self.temporal_window is None:
+            self.reset_temporal_window(self.temporal_window_size)
+        
+        # Add current embedding to window
+        self.temporal_window.append(test_embedding.copy())
+        
+        # If window is not full, use current embedding only
+        if len(self.temporal_window) < self.temporal_window_size:
+            return self.predict(test_embedding)
+        
+        # Average embeddings in the window
+        averaged_embedding = np.mean(list(self.temporal_window), axis=0)
+        
+        # Predict on averaged embedding
+        return self.predict(averaged_embedding)
     
     def predict(self, test_embedding: np.ndarray) -> Tuple[bool, float]:
         """
@@ -273,7 +314,7 @@ class AnomalyDetector:
                 results.append((is_anomaly, score))
             except Exception as e:
                 # If prediction fails, log error but continue
-                print(f"Error predicting on embedding: {e}")
+                logger.error(f"Error predicting on embedding: {e}", exc_info=True)
                 # Mark as anomaly if we can't predict
                 results.append((True, -1.0))
         
