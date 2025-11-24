@@ -20,6 +20,7 @@
 - [Overview](#-overview)
 - [Features](#-features)
 - [System Architecture](#-system-architecture)
+- [Processing Pipeline](#️-processing-pipeline)
 - [Tech Stack](#-tech-stack)
 - [Installation](#-installation)
 - [Quick Start](#-quick-start)
@@ -100,58 +101,274 @@ This project implements an **academic-grade anomaly detection system** that leve
 
 ## 🏗️ System Architecture
 
-### High-Level Architecture
+The system follows a three-tier architecture pattern, separating concerns across presentation, logic, and data layers. This design ensures modularity, maintainability, and scalability.
 
+### Architectural Layers
+
+#### 1. Presentation Layer
+The **Presentation Layer** is implemented using Streamlit, providing the user interface and interaction mechanisms. This layer handles:
+- **User Input Management**: Video uploads, camera feed capture, configuration parameters
+- **State Management**: Session state persistence for models, embeddings, and analysis results
+- **Visualization**: Real-time graphs, frame annotations, statistical reports
+- **Mode Coordination**: Switching between training, testing, and live camera modes
+
+The `StreamlitApp` class (implemented in `streamlit_app.py`) acts as the frontend controller, orchestrating user interactions and delegating processing tasks to the logic layer.
+
+#### 2. Logic Layer
+The **Logic Layer** contains the core business logic and processing components, implemented as manager classes following singleton and factory patterns:
+
+- **`VLMEncoder`** (Singleton): Manages OpenCLIP model lifecycle, handles vision-language encoding operations
+  - Model loading and initialization (lazy loading with caching)
+  - Text extraction via zero-shot classification with dynamic prompts
+  - Image embedding generation with batch processing support
+  - GPU/CPU device management
+
+- **`AnomalyDetector`**: Implements one-class learning anomaly detection
+  - One-Class SVM model training and persistence
+  - StandardScaler integration for feature normalization
+  - Temporal averaging with sliding window mechanism
+  - Decision function computation and anomaly classification
+
+- **`FrameExtractor`**: Handles video frame extraction and caching
+  - Frame sampling at configurable intervals
+  - MD5-based caching system for performance optimization
+  - OpenCV integration for video I/O operations
+
+- **`Config`** (Singleton): Centralized configuration management
+  - YAML-based configuration loading
+  - Default value fallbacks
+  - Runtime configuration access
+
+#### 3. Data Layer
+The **Data Layer** manages persistent storage and asset management:
+- **Model Storage**: Trained One-Class SVM models and StandardScaler instances (`.pkl` files)
+- **Baseline Storage**: Reference embeddings from normal videos (`.npy` files)
+- **Cache Storage**: Extracted frames with hash-based indexing (`.pkl` files)
+- **Upload Storage**: Temporary video file storage for processing
+
+### Component Relationship Diagram
+
+```mermaid
+classDiagram
+    class StreamlitApp {
+        -VLMEncoder vlm_encoder
+        -AnomalyDetector anomaly_detector
+        -FrameExtractor frame_extractor
+        -Config config
+        +upload_video()
+        +train_model()
+        +test_video()
+        +live_camera()
+    }
+    
+    class VLMEncoder {
+        -torch.Model _model
+        -Tokenizer _tokenizer
+        -Preprocess _preprocess
+        -Device _device
+        +extract_text_from_image()
+        +get_image_embedding()
+        +get_frame_embedding()
+        +get_frame_embeddings_batch()
+    }
+    
+    class AnomalyDetector {
+        -OneClassSVM model
+        -StandardScaler scaler
+        -Deque temporal_window
+        +train_one_class_model()
+        +load_model()
+        +predict()
+        +predict_with_temporal_averaging()
+        +detect_anomalies()
+    }
+    
+    class FrameExtractor {
+        -Path cache_dir
+        +extract_frames()
+        +extract_frame_at_time()
+        -_get_video_hash()
+        -_load_from_cache()
+        -_save_to_cache()
+    }
+    
+    class Config {
+        -Dict _config
+        +get(key, default)
+        +_load_config()
+    }
+    
+    StreamlitApp --> VLMEncoder : uses
+    StreamlitApp --> AnomalyDetector : uses
+    StreamlitApp --> FrameExtractor : uses
+    StreamlitApp --> Config : uses
+    AnomalyDetector --> StandardScaler : contains
+    AnomalyDetector --> OneClassSVM : contains
+    VLMEncoder --> OpenCLIP : wraps
+    FrameExtractor --> OpenCV : uses
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Streamlit Dashboard                      │
-│  (Upload Videos | Train Model | Test Videos | Live Camera)  │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-        ┌──────────────┼──────────────┐
-        │              │              │
-        ▼              ▼              ▼
-┌───────────────┐ ┌──────────────┐ ┌──────────────┐
-│ Video         │ │ VLM          │ │ Anomaly      │
-│ Processing    │ │ Encoder      │ │ Detection    │
-│               │ │              │ │              │
-│ • Frame       │ │ • OpenCLIP   │ │ • One-Class  │
-│   Extraction  │ │ • Text       │ │   SVM        │
-│ • Caching     │ │   Extraction │ │ • Standard  │
-│ • Validation  │ │ • Embeddings │ │   Scaler     │
-└───────────────┘ └──────────────┘ └──────────────┘
-        │              │              │
-        └──────────────┼──────────────┘
-                       │
-                       ▼
-            ┌──────────────────────┐
-            │   Assets Storage     │
-            │ • Models (.pkl)      │
-            │ • Baselines (.npy)   │
-            │ • Cache (.pkl)       │
-            │ • Uploads (videos)   │
-            └──────────────────────┘
+
+### Design Patterns
+
+- **Singleton Pattern**: `VLMEncoder` and `Config` ensure single instance to prevent redundant model loading and configuration parsing
+- **Factory Pattern**: Model creation and preprocessing pipeline initialization
+- **Strategy Pattern**: Temporal averaging as an optional processing strategy
+- **Repository Pattern**: Asset storage abstraction for models, baselines, and cache
+
+---
+
+## ⚙️ Processing Pipeline
+
+The processing pipeline describes the algorithmic flow of a single video frame from input acquisition to anomaly decision. This section provides a detailed, step-by-step explanation of the inference process.
+
+### Pipeline Overview
+
+The system processes video frames through a multi-stage pipeline that transforms raw pixel data into semantic embeddings, applies temporal smoothing, and generates anomaly decisions using a trained one-class classifier.
+
+### Step-by-Step Processing Flow
+
+#### 1. Input Acquisition
+**Source**: Video file (via file upload) or live camera feed (via webcam capture)
+
+The `StreamlitApp` receives input through:
+- **File Upload**: Video files (MP4, AVI, MOV, MKV) uploaded via Streamlit's file uploader
+- **Camera Input**: Real-time frames captured via Streamlit's camera input widget
+
+Both input sources are converted to PIL `Image` objects for consistent processing.
+
+#### 2. Frame Sampling
+**Component**: `FrameExtractor.extract_frames()`
+
+Frames are extracted at configurable intervals (default: 500ms):
+- **Interval Calculation**: `frame_interval = fps × (frame_interval_ms / 1000)`
+- **Cache Check**: MD5 hash computed from `(video_path, file_size, mtime, frame_interval)` to check for cached frames
+- **Extraction**: OpenCV (`cv2.VideoCapture`) reads frames at calculated intervals
+- **Validation**: Frames are validated for non-zero dimensions
+- **Caching**: Extracted frames are serialized and cached using pickle for subsequent runs
+
+**Output**: List of PIL `Image` objects representing sampled frames.
+
+#### 3. Batch Preparation
+**Component**: `VLMEncoder.get_frame_embeddings_batch()`
+
+Frames are organized into batches for efficient GPU processing:
+- **Batch Size**: Configurable (default: 16 frames per batch)
+- **Preprocessing**: Each frame is converted to RGB (if needed) and preprocessed using OpenCLIP's standard transforms
+- **Tensor Stacking**: Preprocessed frames are stacked into a single tensor: `[batch_size, 3, 224, 224]`
+
+**Purpose**: Maximize GPU utilization by processing multiple frames in parallel.
+
+#### 4. Feature Extraction
+**Component**: `VLMEncoder` using OpenCLIP (ViT-B-32)
+
+The Vision Transformer encoder processes batched image tensors:
+- **Image Encoding**: `model.encode_image(batch_tensor)` → Normalized embeddings
+- **Normalization**: L2 normalization applied: `features = features / features.norm(dim=-1, keepdim=True)`
+- **Output Dimension**: 512-dimensional normalized vectors (for ViT-B-32)
+
+**Output**: NumPy array of shape `[batch_size, 512]` containing normalized embeddings.
+
+#### 5. Dynamic Context (Optional)
+**Component**: `VLMEncoder.extract_text_from_image()`
+
+If "Expected Objects" are provided by the user:
+- **Prompt Generation**: Dynamic prompts created from expected objects (e.g., `["worker", "machine"]` → `["a worker standing still", "a worker walking", ...]`)
+- **Text Encoding**: Prompts are tokenized and encoded using OpenCLIP's text encoder
+- **Similarity Computation**: Cosine similarity computed between image and text embeddings
+- **Best Match Selection**: Action description with highest similarity score selected
+
+**Purpose**: Domain-specific context enhancement for better semantic understanding.
+
+#### 6. Temporal Smoothing (Optional)
+**Component**: `AnomalyDetector.predict_with_temporal_averaging()`
+
+If temporal averaging is enabled:
+- **Sliding Window**: Maintains a deque of the last N embeddings (default: N=5)
+- **Averaging**: Computes element-wise mean: `averaged_embedding = mean([emb_1, emb_2, ..., emb_N])`
+- **Window Management**: Deque automatically maintains maximum size (FIFO)
+
+**Purpose**: Reduce noise and flickering anomalies by smoothing embeddings across temporal context.
+
+#### 7. Feature Standardization
+**Component**: `AnomalyDetector.predict()` using saved `StandardScaler`
+
+The embedding is transformed using Z-score normalization:
+- **Transformation**: `X_scaled = (X - mean) / std`
+- **Scaler Source**: Statistics (mean, std) from training phase, loaded from disk
+- **Critical Requirement**: Same scaler used for training and inference
+
+**Output**: Standardized embedding with mean=0, std=1 across all features.
+
+#### 8. Inference
+**Component**: `OneClassSVM.decision_function()`
+
+The trained One-Class SVM computes the decision function:
+- **Kernel**: Radial Basis Function (RBF) with gamma="scale"
+- **Decision Function**: Distance from learned decision boundary
+- **Output**: Real-valued score indicating proximity to normal region
+
+**Mathematical Formulation**:
+```
+score = decision_function(X_scaled)
 ```
 
-### Data Flow
+#### 9. Anomaly Decision
+**Component**: `AnomalyDetector.predict()`
 
-1. **Training Phase**:
-   ```
-   Normal Videos → Frame Extraction → VLM Encoding → Embeddings → 
-   StandardScaler → One-Class SVM → Trained Model + Scaler
-   ```
+Binary classification based on decision score:
+- **Decision Boundary**: `score = 0` (learned during training)
+- **Classification Rule**:
+  - `score > 0` → Normal (inside learned region)
+  - `score < 0` → Anomaly (outside learned region)
+- **Prediction**: `OneClassSVM.predict()` returns `+1` (normal) or `-1` (anomaly)
 
-2. **Testing Phase**:
-   ```
-   Test Video → Frame Extraction → VLM Encoding → Embeddings → 
-   StandardScaler.transform() → One-Class SVM.predict() → Anomaly Decision
-   ```
+**Output**: Tuple `(is_anomaly: bool, decision_score: float)`.
 
-3. **Real-Time Phase**:
-   ```
-   Camera Frame → VLM Encoding → Embedding → Scaler → Model → 
-   Real-Time Decision → Alert (if anomaly)
-   ```
+### Processing Pipeline Diagram
+
+```mermaid
+graph LR
+    A[Input Acquisition] --> B[Frame Sampling]
+    B --> C{Check Cache}
+    C -->|Cache Hit| D[Load Cached Frames]
+    C -->|Cache Miss| E[Extract Frames via OpenCV]
+    E --> F[Save to Cache]
+    D --> G[Batch Preparation]
+    F --> G
+    G --> H[Feature Extraction<br/>OpenCLIP ViT-B-32]
+    H --> I{Expected Objects?}
+    I -->|Yes| J[Dynamic Prompt Generation]
+    I -->|No| K[Default Prompts]
+    J --> L[Text-Image Similarity]
+    K --> L
+    L --> M{ Temporal Averaging?}
+    M -->|Yes| N[Sliding Window Average]
+    M -->|No| O[Use Current Embedding]
+    N --> P[Feature Standardization<br/>StandardScaler]
+    O --> P
+    P --> Q[One-Class SVM Inference]
+    Q --> R[Decision Function Score]
+    R --> S{Score < 0?}
+    S -->|Yes| T[Anomaly Detected]
+    S -->|No| U[Normal]
+    T --> V[Alert/Visualization]
+    U --> V
+```
+
+### Performance Characteristics
+
+- **Frame Extraction**: ~10-50ms per frame (depending on video codec and resolution)
+- **VLM Encoding**: ~20-100ms per frame (CPU) or ~5-20ms per frame (GPU with batching)
+- **Temporal Averaging**: O(1) amortized (deque operations)
+- **StandardScaler Transform**: O(d) where d is embedding dimension (512)
+- **One-Class SVM Inference**: O(n_sv × d) where n_sv is number of support vectors
+
+### Critical Dependencies
+
+1. **VLM Model Consistency**: Training and inference must use the same OpenCLIP model variant
+2. **Scaler Persistence**: StandardScaler must be saved and loaded with the One-Class SVM model
+3. **Embedding Dimension**: All embeddings must have consistent dimensionality (512 for ViT-B-32)
+4. **Temporal Window Reset**: Window must be reset between different video sequences
 
 ---
 
